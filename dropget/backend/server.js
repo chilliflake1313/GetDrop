@@ -62,7 +62,7 @@ app.get("/", (req, res) => {
 	res.json({
 		status: "ok",
 		service: "dropget-backend",
-		ws: `ws://${req.hostname}:${PORT}`
+		ws: "wss://getdrop-3.onrender.com"
 	});
 });
 
