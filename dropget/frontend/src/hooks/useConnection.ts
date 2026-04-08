@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { wsService } from '../services/websocket';
 import { WebRTCService } from '../services/webrtc';
 
-const WS_URL = 'wss://your-backend.onrender.com';
+const WS_URL = 'wss://getdrop-1.onrender.com';
 
 export function useConnection() {
   const [sessionCode, setSessionCode] = useState<string>('');
