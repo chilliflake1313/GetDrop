@@ -1,4 +1,5 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { wsService } from '../services/websocket';
 
 interface FileTransferProps {
   isChannelReady: boolean;
@@ -21,6 +22,37 @@ export function FileTransfer({
 }: FileTransferProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const apiBaseUrl = `http://${window.location.hostname}:3001`;
+
+  useEffect(() => {
+    const handler = async (msg: any) => {
+      if (msg.type !== 'file-ready' || !msg.fileId) {
+        return;
+      }
+
+      try {
+        const res = await fetch(`${apiBaseUrl}/download/${msg.fileId}`);
+        if (!res.ok) {
+          throw new Error(`Download URL request failed: ${res.status}`);
+        }
+
+        const { url } = await res.json();
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = msg.fileName || 'dropget-file';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+      } catch (error) {
+        console.error('Cloud download fallback error:', error);
+      }
+    };
+
+    wsService.onMessage(handler);
+    return () => {
+      wsService.removeHandler(handler);
+    };
+  }, [apiBaseUrl]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

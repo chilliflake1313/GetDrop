@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { WebRTCService } from '../services/webrtc';
 import { fileTransferService, FileMetadata } from '../services/fileTransfer';
+import { wsService } from '../services/websocket';
 
 interface ReceivedFile {
   metadata: FileMetadata;
@@ -12,6 +13,7 @@ export function useFileTransfer(webrtc: WebRTCService) {
   const [sendingProgress, setSendingProgress] = useState(0);
   const [receivingProgress, setReceivingProgress] = useState({ progress: 0, name: '' });
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
+  const apiBaseUrl = `http://${window.location.hostname}:3001`;
 
   useEffect(() => {
     webrtc.onDataChannel((channel) => {
@@ -37,14 +39,44 @@ export function useFileTransfer(webrtc: WebRTCService) {
     });
   }, [webrtc]);
 
+  const uploadToCloud = useCallback(async (file: File) => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch(`${apiBaseUrl}/upload`, {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!res.ok) {
+        throw new Error(`Upload failed with status ${res.status}`);
+      }
+
+      const { fileId } = await res.json();
+      wsService.send({ type: 'file-ready', fileId, fileName: file.name });
+      setSendingProgress(0);
+    } catch (error) {
+      console.error('Cloud upload error:', error);
+      setSendingProgress(0);
+    }
+  }, [apiBaseUrl]);
+
   const sendFile = useCallback(async (file: File) => {
     const channel = webrtc.getDataChannel();
+    setSendingProgress(0);
+
+    const fallbackTimeout = window.setTimeout(() => {
+      if (!channel || channel.readyState !== 'open') {
+        uploadToCloud(file);
+      }
+    }, 5000);
+
     if (!channel || channel.readyState !== 'open') {
-      console.error('Data channel not ready');
       return;
     }
 
-    setSendingProgress(0);
+    clearTimeout(fallbackTimeout);
 
     try {
       await fileTransferService.sendFile(file, channel, {
@@ -55,13 +87,15 @@ export function useFileTransfer(webrtc: WebRTCService) {
         onError: (error) => {
           console.error('Send error:', error);
           setSendingProgress(0);
+          uploadToCloud(file);
         }
       });
     } catch (error) {
       console.error('Send file error:', error);
       setSendingProgress(0);
+      uploadToCloud(file);
     }
-  }, [webrtc]);
+  }, [webrtc, uploadToCloud]);
 
   return {
     isChannelReady,

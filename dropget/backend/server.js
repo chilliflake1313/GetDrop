@@ -1,9 +1,34 @@
+import express from "express";
+import multer from "multer";
+import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import { randomUUID } from "node:crypto";
 import { networkInterfaces } from "os";
+import {
+	S3Client,
+	PutObjectCommand,
+	GetObjectCommand,
+	DeleteObjectCommand
+} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const PORT = Number(process.env.PORT) || 3001;
-const wss = new WebSocketServer({ port: PORT, host: "0.0.0.0" });
+const BUCKET = process.env.MINIO_BUCKET || "dropget";
+
+const app = express();
+const server = createServer(app);
+const wss = new WebSocketServer({ server });
+const upload = multer({ storage: multer.memoryStorage() });
+
+const s3 = new S3Client({
+	region: process.env.MINIO_REGION || "us-east-1",
+	endpoint: process.env.MINIO_ENDPOINT || "http://localhost:9000",
+	credentials: {
+		accessKeyId: process.env.MINIO_ACCESS_KEY || "admin",
+		secretAccessKey: process.env.MINIO_SECRET_KEY || "password"
+	},
+	forcePathStyle: true
+});
 
 function getLocalIP() {
 	const interfaces = networkInterfaces();
@@ -20,6 +45,19 @@ function getLocalIP() {
 const clients = new Map();
 const sessions = new Map();
 
+app.use((req, res, next) => {
+	res.header("Access-Control-Allow-Origin", "*");
+	res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+	res.header("Access-Control-Allow-Headers", "Content-Type");
+	if (req.method === "OPTIONS") {
+		res.sendStatus(204);
+		return;
+	}
+	next();
+});
+
+app.use(express.json());
+
 function generateSessionCode() {
 	return Math.random().toString(36).substring(2, 10).toUpperCase();
 }
@@ -29,6 +67,59 @@ function sendJson(socket, payload) {
 		socket.send(JSON.stringify(payload));
 	}
 }
+
+export const cleanupFile = async (key) => {
+	await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
+};
+
+app.post("/upload", upload.single("file"), async (req, res) => {
+	try {
+		if (!req.file) {
+			res.status(400).json({ message: "No file uploaded" });
+			return;
+		}
+
+		const fileId = randomUUID();
+
+		await s3.send(
+			new PutObjectCommand({
+				Bucket: BUCKET,
+				Key: fileId,
+				Body: req.file.buffer,
+				ContentType: req.file.mimetype || "application/octet-stream"
+			})
+		);
+
+		setTimeout(() => {
+			cleanupFile(fileId).catch((error) => {
+				console.error("MinIO cleanup error:", error);
+			});
+		}, 15 * 60 * 1000);
+
+		res.json({ fileId, fileName: req.file.originalname });
+	} catch (error) {
+		console.error("Upload error:", error);
+		res.status(500).json({ message: "Upload failed" });
+	}
+});
+
+app.get("/download/:fileId", async (req, res) => {
+	try {
+		const url = await getSignedUrl(
+			s3,
+			new GetObjectCommand({
+				Bucket: BUCKET,
+				Key: req.params.fileId
+			}),
+			{ expiresIn: 600 }
+		);
+
+		res.json({ url });
+	} catch (error) {
+		console.error("Download URL error:", error);
+		res.status(500).json({ message: "Could not create download URL" });
+	}
+});
 
 wss.on("connection", (socket) => {
 	const clientId = randomUUID();
@@ -92,7 +183,7 @@ wss.on("connection", (socket) => {
 		}
 
 		// Relay WebRTC signaling messages between paired peers
-		if (["offer", "answer", "ice-candidate"].includes(message.type)) {
+		if (["offer", "answer", "ice-candidate", "file-ready"].includes(message.type)) {
 			if (!clientInfo.sessionCode) {
 				console.log(`ERROR: ${message.type} received but client not in session`);
 				sendJson(socket, { type: "error", message: "Not in a session" });
@@ -152,8 +243,11 @@ wss.on("connection", (socket) => {
 });
 
 const localIP = getLocalIP();
-console.log(`Signaling server listening on:`);
-console.log(`  Local: ws://localhost:${PORT}`);
-console.log(`  Network: ws://${localIP}:${PORT}`);
-console.log(`  All interfaces: ws://0.0.0.0:${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+	console.log("DropGet server listening on:");
+	console.log(`  Local HTTP: http://localhost:${PORT}`);
+	console.log(`  Network HTTP: http://${localIP}:${PORT}`);
+	console.log(`  Local WS: ws://localhost:${PORT}`);
+	console.log(`  Network WS: ws://${localIP}:${PORT}`);
+});
 
