@@ -1,4 +1,6 @@
-const CHUNK_SIZE = 16384; // 16KB
+const CHUNK_SIZE = 65536; // 64KB
+const MAX_BUFFERED_AMOUNT = 1_000_000;
+const BUFFER_WAIT_MS = 50;
 
 export interface FileMetadata {
   name: string;
@@ -13,6 +15,15 @@ export interface FileTransferCallbacks {
 }
 
 export class FileTransferService {
+  private async waitForBufferDrain(channel: RTCDataChannel): Promise<void> {
+    while (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+      if (channel.readyState !== 'open') {
+        throw new Error('Data channel closed');
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, BUFFER_WAIT_MS));
+    }
+  }
+
   async sendFile(
     file: File,
     channel: RTCDataChannel,
@@ -28,48 +39,41 @@ export class FileTransferService {
       type: file.type
     };
 
-    channel.send(JSON.stringify({ type: 'metadata', metadata }));
+    try {
+      channel.send(JSON.stringify({ type: 'metadata', metadata }));
 
-    // Send file in chunks
-    let offset = 0;
-    const reader = new FileReader();
+      let offset = 0;
 
-    return new Promise((resolve, reject) => {
-      reader.onerror = () => {
-        const error = new Error('File read error');
-        callbacks?.onError?.(error);
-        reject(error);
-      };
-
-      reader.onload = (e) => {
-        if (e.target?.result) {
-          if (channel.readyState !== 'open') {
-            reject(new Error('Data channel closed'));
-            return;
-          }
-          channel.send(e.target.result as ArrayBuffer);
-          offset += CHUNK_SIZE;
-
-          const progress = Math.min((offset / file.size) * 100, 100);
-          callbacks?.onProgress?.(Math.round(progress));
-
-          if (offset < file.size) {
-            readSlice(offset);
-          } else {
-            channel.send(JSON.stringify({ type: 'end' }));
-            callbacks?.onComplete?.();
-            resolve();
-          }
+      while (offset < file.size) {
+        if (channel.readyState !== 'open') {
+          throw new Error('Data channel closed');
         }
-      };
 
-      const readSlice = (o: number) => {
-        const slice = file.slice(o, o + CHUNK_SIZE);
-        reader.readAsArrayBuffer(slice);
-      };
+        if (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+          await this.waitForBufferDrain(channel);
+        }
 
-      readSlice(0);
-    });
+        const slice = file.slice(offset, offset + CHUNK_SIZE);
+        const buffer = await slice.arrayBuffer();
+        channel.send(buffer);
+
+        offset += buffer.byteLength;
+
+        const progress = Math.min((offset / file.size) * 100, 100);
+        callbacks?.onProgress?.(Math.round(progress));
+      }
+
+      if (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+        await this.waitForBufferDrain(channel);
+      }
+
+      channel.send(JSON.stringify({ type: 'end' }));
+      callbacks?.onComplete?.();
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error('File send error');
+      callbacks?.onError?.(error);
+      throw error;
+    }
   }
 
   receiveFile(

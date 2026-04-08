@@ -12,6 +12,7 @@ export class WebRTCService {
   private dataChannel: RTCDataChannel | null = null;
   private isInitiator = false;
   private onDataChannelCallback?: (channel: RTCDataChannel) => void;
+  private connectionStateHandlers = new Set<(state: RTCPeerConnectionState) => void>();
 
   init(isInitiator: boolean) {
     this.isInitiator = isInitiator;
@@ -27,7 +28,12 @@ export class WebRTCService {
     };
 
     this.pc.onconnectionstatechange = () => {
-      console.log('Connection state:', this.pc?.connectionState);
+      const state = this.pc?.connectionState;
+      console.log('Connection state:', state);
+      if (!state) {
+        return;
+      }
+      this.connectionStateHandlers.forEach((handler) => handler(state));
     };
 
     this.pc.ondatachannel = (event) => {
@@ -112,6 +118,18 @@ export class WebRTCService {
     return this.dataChannel;
   }
 
+  onConnectionStateChange(callback: (state: RTCPeerConnectionState) => void): () => void {
+    this.connectionStateHandlers.add(callback);
+
+    if (this.pc?.connectionState) {
+      callback(this.pc.connectionState);
+    }
+
+    return () => {
+      this.connectionStateHandlers.delete(callback);
+    };
+  }
+
   close() {
     if (this.dataChannel) {
       this.dataChannel.close();
@@ -121,5 +139,6 @@ export class WebRTCService {
     }
     this.pc = null;
     this.dataChannel = null;
+    this.connectionStateHandlers.clear();
   }
 }

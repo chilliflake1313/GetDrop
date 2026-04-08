@@ -8,6 +8,8 @@ interface ReceivedFile {
   url: string;
 }
 
+const P2P_CONNECTION_TIMEOUT_MS = 6000;
+
 export function useFileTransfer(webrtc: WebRTCService) {
   const [isChannelReady, setIsChannelReady] = useState(false);
   const [sendingProgress, setSendingProgress] = useState(0);
@@ -39,6 +41,18 @@ export function useFileTransfer(webrtc: WebRTCService) {
     });
   }, [webrtc]);
 
+  useEffect(() => {
+    const unsubscribe = webrtc.onConnectionStateChange((state) => {
+      if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+        setIsChannelReady(false);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [webrtc]);
+
   const uploadToCloud = useCallback(async (file: File) => {
     try {
       const formData = new FormData();
@@ -62,21 +76,86 @@ export function useFileTransfer(webrtc: WebRTCService) {
     }
   }, [apiBaseUrl]);
 
-  const sendFile = useCallback(async (file: File) => {
-    const channel = webrtc.getDataChannel();
-    setSendingProgress(0);
-
-    const fallbackTimeout = window.setTimeout(() => {
-      if (!channel || channel.readyState !== 'open') {
-        uploadToCloud(file);
-      }
-    }, 5000);
-
-    if (!channel || channel.readyState !== 'open') {
-      return;
+  const waitForOpenChannel = useCallback(async (): Promise<RTCDataChannel | null> => {
+    const existingChannel = webrtc.getDataChannel();
+    if (existingChannel?.readyState === 'open') {
+      return existingChannel;
     }
 
-    clearTimeout(fallbackTimeout);
+    return new Promise((resolve) => {
+      let settled = false;
+      let unsubscribeConnectionState: (() => void) | null = null;
+      let intervalId: number | null = null;
+      let timeoutId: number | null = null;
+
+      const finish = (channel: RTCDataChannel | null) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        unsubscribeConnectionState?.();
+        if (intervalId !== null) {
+          window.clearInterval(intervalId);
+        }
+        if (timeoutId !== null) {
+          window.clearTimeout(timeoutId);
+        }
+        resolve(channel);
+      };
+
+      const checkChannel = () => {
+        const channel = webrtc.getDataChannel();
+        if (channel?.readyState === 'open') {
+          finish(channel);
+        }
+      };
+
+      unsubscribeConnectionState = webrtc.onConnectionStateChange((state) => {
+        if (state === 'failed' || state === 'disconnected') {
+          finish(null);
+          return;
+        }
+
+        if (state === 'connected') {
+          checkChannel();
+        }
+      });
+
+      intervalId = window.setInterval(checkChannel, 100);
+      timeoutId = window.setTimeout(() => finish(null), P2P_CONNECTION_TIMEOUT_MS);
+
+      checkChannel();
+    });
+  }, [webrtc]);
+
+  const sendFile = useCallback(async (file: File) => {
+    setSendingProgress(0);
+    let fallbackTriggered = false;
+
+    const triggerFallback = () => {
+      if (fallbackTriggered) {
+        return;
+      }
+
+      fallbackTriggered = true;
+      setSendingProgress(0);
+      uploadToCloud(file);
+    };
+
+    const unsubscribeConnectionState = webrtc.onConnectionStateChange((state) => {
+      if (state === 'failed' || state === 'disconnected') {
+        triggerFallback();
+      }
+    });
+
+    const channel = await waitForOpenChannel();
+
+    if (!channel || channel.readyState !== 'open') {
+      triggerFallback();
+      unsubscribeConnectionState();
+      return;
+    }
 
     try {
       await fileTransferService.sendFile(file, channel, {
@@ -86,16 +165,16 @@ export function useFileTransfer(webrtc: WebRTCService) {
         },
         onError: (error) => {
           console.error('Send error:', error);
-          setSendingProgress(0);
-          uploadToCloud(file);
+          triggerFallback();
         }
       });
     } catch (error) {
       console.error('Send file error:', error);
-      setSendingProgress(0);
-      uploadToCloud(file);
+      triggerFallback();
+    } finally {
+      unsubscribeConnectionState();
     }
-  }, [webrtc, uploadToCloud]);
+  }, [webrtc, uploadToCloud, waitForOpenChannel]);
 
   return {
     isChannelReady,
