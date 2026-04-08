@@ -58,6 +58,14 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
+app.get("/", (req, res) => {
+	res.json({
+		status: "ok",
+		service: "dropget-backend",
+		ws: `ws://${req.hostname}:${PORT}`
+	});
+});
+
 function generateSessionCode() {
 	return Math.random().toString(36).substring(2, 10).toUpperCase();
 }
@@ -221,6 +229,8 @@ wss.on("connection", (socket) => {
 		if (clientInfo && clientInfo.sessionCode) {
 			const session = sessions.get(clientInfo.sessionCode);
 			if (session) {
+				session.peers = session.peers.filter(id => id !== clientId);
+
 				// Notify the other peer
 				const otherPeerId = session.peers.find(id => id !== clientId);
 				if (otherPeerId) {
@@ -229,8 +239,10 @@ wss.on("connection", (socket) => {
 						sendJson(otherClient.socket, { type: "peer-left" });
 					}
 				}
-				// Clean up session
-				sessions.delete(clientInfo.sessionCode);
+
+				if (session.peers.length === 0) {
+					sessions.delete(clientInfo.sessionCode);
+				}
 			}
 		}
 		clients.delete(clientId);

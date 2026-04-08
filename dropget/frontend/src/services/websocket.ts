@@ -5,20 +5,27 @@ class WebSocketService {
   private handlers: MessageHandler[] = [];
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
+  private manualClose = false;
 
   connect(url: string): Promise<void> {
     return new Promise((resolve, reject) => {
+      if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+        resolve();
+        return;
+      }
+
+      this.manualClose = false;
       this.ws = new WebSocket(url);
 
       this.ws.onopen = () => {
-        console.log('WebSocket connected');
+        console.log('WebSocket connected - websocket.ts:23');
         this.reconnectAttempts = 0;
         resolve();
       };
 
       this.ws.onerror = (error) => {
         const errorMessage = error instanceof Event ? 'WebSocket connection failed' : String(error);
-        console.error('WebSocket error:', errorMessage);
+        console.error('WebSocket error: - websocket.ts:30', errorMessage);
         reject(new Error(errorMessage));
       };
 
@@ -28,8 +35,10 @@ class WebSocketService {
       };
 
       this.ws.onclose = () => {
-        console.log('WebSocket closed');
-        this.attemptReconnect(url);
+        console.log('WebSocket closed - websocket.ts:40');
+        if (!this.manualClose) {
+          this.attemptReconnect(url);
+        }
       };
     });
   }
@@ -38,7 +47,7 @@ class WebSocketService {
     if (this.reconnectAttempts < this.maxReconnectAttempts) {
       this.reconnectAttempts++;
       setTimeout(() => {
-        console.log(`Reconnecting... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        console.log(`Reconnecting... (${this.reconnectAttempts}/${this.maxReconnectAttempts}) - websocket.ts:52`);
         this.connect(url);
       }, 2000);
     }
@@ -60,6 +69,7 @@ class WebSocketService {
 
   disconnect() {
     if (this.ws) {
+      this.manualClose = true;
       this.ws.close();
       this.ws = null;
     }
