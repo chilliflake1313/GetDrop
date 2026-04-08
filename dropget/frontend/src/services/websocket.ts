@@ -1,0 +1,68 @@
+export type MessageHandler = (message: any) => void;
+
+class WebSocketService {
+  private ws: WebSocket | null = null;
+  private handlers: MessageHandler[] = [];
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+
+  connect(url: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocket(url);
+
+      this.ws.onopen = () => {
+        console.log('WebSocket connected');
+        this.reconnectAttempts = 0;
+        resolve();
+      };
+
+      this.ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        reject(error);
+      };
+
+      this.ws.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        this.handlers.forEach(handler => handler(message));
+      };
+
+      this.ws.onclose = () => {
+        console.log('WebSocket closed');
+        this.attemptReconnect(url);
+      };
+    });
+  }
+
+  private attemptReconnect(url: string) {
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+      setTimeout(() => {
+        console.log(`Reconnecting... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+        this.connect(url);
+      }, 2000);
+    }
+  }
+
+  send(message: any) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+    }
+  }
+
+  onMessage(handler: MessageHandler) {
+    this.handlers.push(handler);
+  }
+
+  removeHandler(handler: MessageHandler) {
+    this.handlers = this.handlers.filter(h => h !== handler);
+  }
+
+  disconnect() {
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+  }
+}
+
+export const wsService = new WebSocketService();
