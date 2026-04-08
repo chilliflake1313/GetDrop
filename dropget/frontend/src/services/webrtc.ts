@@ -30,14 +30,31 @@ export class WebRTCService {
       console.log('Connection state:', this.pc?.connectionState);
     };
 
+    this.pc.ondatachannel = (event) => {
+      this.dataChannel = event.channel;
+      this.setupDataChannel();
+    };
+
     if (this.isInitiator) {
       this.createDataChannel();
-    } else {
-      this.pc.ondatachannel = (event) => {
-        this.dataChannel = event.channel;
-        this.setupDataChannel();
-      };
     }
+  }
+
+  private setupDataChannel() {
+    if (!this.dataChannel) return;
+
+    const channel = this.dataChannel;
+
+    channel.onopen = () => {
+      console.log('Data channel open');
+      if (this.onDataChannelCallback) {
+        this.onDataChannelCallback(channel);
+      }
+    };
+
+    channel.onclose = () => {
+      console.log('Data channel closed');
+    };
   }
 
   private createDataChannel() {
@@ -47,21 +64,6 @@ export class WebRTCService {
       ordered: true
     });
     this.setupDataChannel();
-  }
-
-  private setupDataChannel() {
-    if (!this.dataChannel) return;
-
-    this.dataChannel.onopen = () => {
-      console.log('Data channel open');
-      if (this.onDataChannelCallback) {
-        this.onDataChannelCallback(this.dataChannel);
-      }
-    };
-
-    this.dataChannel.onclose = () => {
-      console.log('Data channel closed');
-    };
   }
 
   async createOffer() {

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { wsService } from '../services/websocket';
 import { WebRTCService } from '../services/webrtc';
 
-const WS_URL = 'ws://localhost:8080';
+const WS_URL = 'ws://localhost:3001';
 
 export function useConnection() {
   const [sessionCode, setSessionCode] = useState<string>('');

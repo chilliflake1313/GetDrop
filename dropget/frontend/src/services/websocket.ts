@@ -17,8 +17,9 @@ class WebSocketService {
       };
 
       this.ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        reject(error);
+        const errorMessage = error instanceof Event ? 'WebSocket connection failed' : String(error);
+        console.error('WebSocket error:', errorMessage);
+        reject(new Error(errorMessage));
       };
 
       this.ws.onmessage = (event) => {

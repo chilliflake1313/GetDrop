@@ -18,13 +18,16 @@ export class FileTransferService {
     channel: RTCDataChannel,
     callbacks?: FileTransferCallbacks
   ): Promise<void> {
+    if (channel.readyState !== 'open') {
+      throw new Error('Data channel is not open');
+    }
+
     const metadata: FileMetadata = {
       name: file.name,
       size: file.size,
       type: file.type
     };
 
-    // Send metadata
     channel.send(JSON.stringify({ type: 'metadata', metadata }));
 
     // Send file in chunks
@@ -40,6 +43,10 @@ export class FileTransferService {
 
       reader.onload = (e) => {
         if (e.target?.result) {
+          if (channel.readyState !== 'open') {
+            reject(new Error('Data channel closed'));
+            return;
+          }
           channel.send(e.target.result as ArrayBuffer);
           offset += CHUNK_SIZE;
 
@@ -81,8 +88,9 @@ export class FileTransferService {
         const message = JSON.parse(event.data);
 
         if (message.type === 'metadata') {
-          fileMetadata = message.metadata;
-          callbacks?.onMetadata?.(fileMetadata);
+          const metadata = message.metadata as FileMetadata;
+          fileMetadata = metadata;
+          callbacks?.onMetadata?.(metadata);
         } else if (message.type === 'end') {
           if (fileMetadata) {
             const blob = new Blob(chunks, { type: fileMetadata.type });
