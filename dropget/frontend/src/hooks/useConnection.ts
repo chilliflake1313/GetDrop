@@ -2,7 +2,19 @@ import { useState, useEffect, useCallback } from 'react';
 import { wsService } from '../services/websocket';
 import { WebRTCService } from '../services/webrtc';
 
-const WS_URL = 'ws://localhost:3001';
+const getWebSocketURL = () => {
+  // Check if running on mobile/different host
+  const hostname = window.location.hostname;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    // Running locally on same machine
+    return `ws://${hostname}:3001`;
+  }
+  // Running on different device (Android, etc)
+  // Use the same host as the page is loaded from
+  return `ws://${hostname}:3001`;
+};
+
+const WS_URL = getWebSocketURL();
 
 export function useConnection() {
   const [sessionCode, setSessionCode] = useState<string>('');

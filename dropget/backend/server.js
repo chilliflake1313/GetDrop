@@ -1,8 +1,21 @@
 import { WebSocketServer } from "ws";
 import { randomUUID } from "node:crypto";
+import { networkInterfaces } from "os";
 
 const PORT = Number(process.env.PORT) || 3001;
-const wss = new WebSocketServer({ port: PORT });
+const wss = new WebSocketServer({ port: PORT, host: "0.0.0.0" });
+
+function getLocalIP() {
+	const interfaces = networkInterfaces();
+	for (const name of Object.keys(interfaces)) {
+		for (const iface of interfaces[name] || []) {
+			if (iface.family === "IPv4" && !iface.internal) {
+				return iface.address;
+			}
+		}
+	}
+	return "localhost";
+}
 
 const clients = new Map();
 const sessions = new Map();
@@ -49,7 +62,9 @@ wss.on("connection", (socket) => {
 		// Handle session join
 		if (message.type === "join") {
 			const { code } = message;
+			console.log(`JOIN REQUEST: code="${code}", sessions=${Array.from(sessions.keys()).join(", ")}`);
 			if (!code || !sessions.has(code)) {
+				console.log(`ERROR: Session "${code}" not found`);
 				sendJson(socket, { type: "error", message: "Session not found" });
 				return;
 			}
@@ -79,12 +94,14 @@ wss.on("connection", (socket) => {
 		// Relay WebRTC signaling messages between paired peers
 		if (["offer", "answer", "ice-candidate"].includes(message.type)) {
 			if (!clientInfo.sessionCode) {
+				console.log(`ERROR: ${message.type} received but client not in session`);
 				sendJson(socket, { type: "error", message: "Not in a session" });
 				return;
 			}
 
 			const session = sessions.get(clientInfo.sessionCode);
 			if (!session || session.peers.length < 2) {
+				console.log(`ERROR: ${message.type} received but peer not found in session`);
 				sendJson(socket, { type: "error", message: "Peer not found" });
 				return;
 			}
@@ -92,12 +109,14 @@ wss.on("connection", (socket) => {
 			// Find the other peer in the session
 			const otherPeerId = session.peers.find(id => id !== clientId);
 			if (!otherPeerId) {
+				console.log(`ERROR: No other peer found for ${message.type}`);
 				sendJson(socket, { type: "error", message: "Peer not found" });
 				return;
 			}
 
 			const otherClient = clients.get(otherPeerId);
 			if (otherClient) {
+				console.log(`RELAYED ${message.type} from ${clientId.slice(0, 8)} to ${otherPeerId.slice(0, 8)}`);
 				sendJson(otherClient.socket, {
 					...message,
 					from: clientId
@@ -132,5 +151,9 @@ wss.on("connection", (socket) => {
 	});
 });
 
-console.log(`Signaling server listening on ws://localhost:${PORT} - server.js:135`);
+const localIP = getLocalIP();
+console.log(`Signaling server listening on:`);
+console.log(`  Local: ws://localhost:${PORT}`);
+console.log(`  Network: ws://${localIP}:${PORT}`);
+console.log(`  All interfaces: ws://0.0.0.0:${PORT}`);
 
