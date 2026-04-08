@@ -1,4 +1,5 @@
 import React from 'react';
+import './App.css';
 import { Connection } from './components/Connection';
 import { FileTransfer } from './components/FileTransfer';
 import { useConnection } from './hooks/useConnection';

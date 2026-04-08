@@ -1,0 +1,21 @@
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.drop-zone:hover {
+  border-color: #007bff;
+  background-color: #f8f9fa;
+}
+
+.download-button:hover {
+  background-color: #0056b3;
+}
+
+.primary-button:hover {
+  background-color: #0056b3;
+}
+
+.secondary-button:hover {
+  background-color: #218838;
+}
