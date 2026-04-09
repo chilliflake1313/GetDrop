@@ -1,9 +1,12 @@
 import express from "express";
+import rateLimit from "express-rate-limit";
 import multer from "multer";
 import { createServer } from "node:http";
 import { createReadStream } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { extname } from "node:path";
+import dotenv from "dotenv";
+import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { randomUUID } from "node:crypto";
 import { networkInterfaces } from "os";
@@ -16,18 +19,45 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
+dotenv.config({ path: fileURLToPath(new URL(".env", import.meta.url)), override: true });
+
 const PORT = Number(process.env.PORT) || 3001;
-const BUCKET = process.env.R2_BUCKET || "dropget";
+const BUCKET = process.env.R2_BUCKET || "get-drop";
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
-const R2_ENDPOINT = process.env.R2_ENDPOINT ||
+function normalizeR2Endpoint(value) {
+	if (!value) {
+		return undefined;
+	}
+
+	try {
+		return new URL(value).origin;
+	} catch {
+		return value;
+	}
+}
+
+const R2_ENDPOINT = normalizeR2Endpoint(process.env.R2_ENDPOINT) ||
 	(R2_ACCOUNT_ID ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : undefined);
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 const HUNDRED_MB_BYTES = 100 * 1024 * 1024;
 const CLEANUP_INTERVAL_MS = 60 * 1000;
-const MAX_UPLOAD_SIZE_BYTES = Number(process.env.MAX_UPLOAD_SIZE_BYTES) || 1024 * 1024 * 1024;
+function getNumericEnv(name, fallbackValue) {
+	const rawValue = process.env[name];
+	if (rawValue === undefined) {
+		return fallbackValue;
+	}
+
+	const parsed = Number(rawValue);
+	return Number.isFinite(parsed) ? parsed : fallbackValue;
+}
+
+const MAX_UPLOAD_SIZE_BYTES = getNumericEnv("MAX_UPLOAD_SIZE_BYTES", 1024 * 1024 * 1024);
 const MAX_UPLOAD_ATTEMPTS = 3;
 const MAX_CLEANUP_ATTEMPTS = 3;
+const MAX_ACTIVE_FILES = getNumericEnv("MAX_ACTIVE_FILES", 500);
+const UPLOAD_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const UPLOAD_RATE_LIMIT_MAX = 30;
 
 const app = express();
 const server = createServer(app);
@@ -37,6 +67,10 @@ const upload = multer({
 	limits: {
 		fileSize: MAX_UPLOAD_SIZE_BYTES
 	}
+});
+const uploadRateLimiter = rateLimit({
+	windowMs: UPLOAD_RATE_LIMIT_WINDOW_MS,
+	max: UPLOAD_RATE_LIMIT_MAX
 });
 
 const uploadedFiles = new Map();
@@ -48,7 +82,8 @@ const s3 = R2_ENDPOINT
 		credentials: {
 			accessKeyId: process.env.R2_ACCESS_KEY || "",
 			secretAccessKey: process.env.R2_SECRET_KEY || ""
-		}
+		},
+		forcePathStyle: true
 	})
 	: null;
 
@@ -119,6 +154,25 @@ function trackUploadedFile(fileId, size) {
 	});
 }
 
+function isAllowedMimeType(mimeType) {
+	const blockedMimeTypes = new Set([
+		"text/html",
+		"application/javascript",
+		"text/javascript",
+		"application/x-msdownload"
+	]);
+
+	if (!mimeType) {
+		return false;
+	}
+
+	return !blockedMimeTypes.has(mimeType.toLowerCase());
+}
+
+function getTotalActiveFiles() {
+	return uploadedFiles.size;
+}
+
 async function createSignedDownloadUrl(fileId) {
 	return getSignedUrl(
 		getS3Client(),
@@ -127,7 +181,7 @@ async function createSignedDownloadUrl(fileId) {
 			Key: fileId,
 			ResponseContentDisposition: `attachment; filename="${fileId}"`
 		}),
-		{ expiresIn: 600 }
+		{ expiresIn: 300 }
 	);
 }
 
@@ -197,18 +251,18 @@ async function cleanupExpiredFiles() {
 			if (metadata.cleanupAttempts >= MAX_CLEANUP_ATTEMPTS) {
 				uploadedFiles.delete(fileId);
 			}
-			console.error("R2 cleanup error: - server.js:200", error);
+			console.error("R2 cleanup error: - server.js:254", error);
 		}
 	}
 }
 
 setInterval(() => {
 	cleanupExpiredFiles().catch((error) => {
-		console.error("R2 cleanup interval error: - server.js:207", error);
+		console.error("R2 cleanup interval error: - server.js:261", error);
 	});
 }, CLEANUP_INTERVAL_MS);
 
-app.post("/upload", upload.single("file"), async (req, res) => {
+app.post("/upload", uploadRateLimiter, upload.single("file"), async (req, res) => {
 	let tempFilePath = null;
 	try {
 		if (!req.file) {
@@ -220,6 +274,16 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
 		if ((req.file.size || 0) > MAX_UPLOAD_SIZE_BYTES) {
 			res.status(400).json({ message: "File too large" });
+			return;
+		}
+
+		if (!isAllowedMimeType(req.file.mimetype || "")) {
+			res.status(400).json({ message: "Invalid file type" });
+			return;
+		}
+
+		if (getTotalActiveFiles() >= MAX_ACTIVE_FILES) {
+			res.status(503).json({ message: "Active storage limit reached" });
 			return;
 		}
 
@@ -243,7 +307,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
 		res.json({ fileId });
 	} catch (error) {
-		console.error("Upload error: - server.js:246", error);
+		console.error("Upload error: - server.js:310", error);
 		res.status(500).json({ message: "Upload failed" });
 	} finally {
 		if (tempFilePath) {
@@ -256,11 +320,25 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 
 app.get("/download/:fileId", async (req, res) => {
 	try {
+		const metadata = uploadedFiles.get(req.params.fileId);
+		if (!metadata) {
+			res.status(404).json({ message: "File not available" });
+			return;
+		}
+
+		if (metadata.expiresAt <= Date.now()) {
+			cleanupFile(req.params.fileId).catch((error) => {
+				console.error("Late cleanup error: - server.js:331", error);
+			});
+			res.status(410).json({ message: "File expired" });
+			return;
+		}
+
 		const url = await createSignedDownloadUrl(req.params.fileId);
 
 		res.json({ url });
 	} catch (error) {
-		console.error("Download URL error: - server.js:263", error);
+		console.error("Download URL error: - server.js:341", error);
 		res.status(500).json({ message: "Could not create download URL" });
 	}
 });
@@ -278,7 +356,7 @@ wss.on("connection", (socket) => {
 	const clientId = randomUUID();
 	clients.set(clientId, { socket, sessionCode: null });
 
-	console.log(`Client connected: ${clientId} - server.js:272`);
+	console.log(`Client connected: ${clientId} - server.js:359`);
 
 	socket.on("message", (data) => {
 		let message;
@@ -299,16 +377,16 @@ wss.on("connection", (socket) => {
 			clientInfo.sessionCode = code;
 			sessions.set(code, { peers: [clientId], createdAt: Date.now() });
 			sendJson(socket, { type: "created", code });
-			console.log(`Session created: ${code} - server.js:293`);
+			console.log(`Session created: ${code} - server.js:380`);
 			return;
 		}
 
 		// Handle session join
 		if (message.type === "join") {
 			const { code } = message;
-			console.log(`JOIN REQUEST: code="${code}", sessions=${Array.from(sessions.keys()).join(", ")} - server.js:300`);
+			console.log(`JOIN REQUEST: code="${code}", sessions=${Array.from(sessions.keys()).join(", ")} - server.js:387`);
 			if (!code || !sessions.has(code)) {
-				console.log(`ERROR: Session "${code}" not found - server.js:302`);
+				console.log(`ERROR: Session "${code}" not found - server.js:389`);
 				sendJson(socket, { type: "error", message: "Session not found" });
 				return;
 			}
@@ -331,21 +409,21 @@ wss.on("connection", (socket) => {
 				sendJson(otherClient.socket, { type: "peer-joined", peerId: clientId });
 			}
 
-			console.log(`Client joined session ${code}: ${clientId} - server.js:325`);
+			console.log(`Client joined session ${code}: ${clientId} - server.js:412`);
 			return;
 		}
 
 		// Relay WebRTC signaling messages between paired peers
 		if (["offer", "answer", "ice-candidate", "file-ready"].includes(message.type)) {
 			if (!clientInfo.sessionCode) {
-				console.log(`ERROR: ${message.type} received but client not in session - server.js:332`);
+				console.log(`ERROR: ${message.type} received but client not in session - server.js:419`);
 				sendJson(socket, { type: "error", message: "Not in a session" });
 				return;
 			}
 
 			const session = sessions.get(clientInfo.sessionCode);
 			if (!session || session.peers.length < 2) {
-				console.log(`ERROR: ${message.type} received but peer not found in session - server.js:339`);
+				console.log(`ERROR: ${message.type} received but peer not found in session - server.js:426`);
 				sendJson(socket, { type: "error", message: "Peer not found" });
 				return;
 			}
@@ -353,14 +431,14 @@ wss.on("connection", (socket) => {
 			// Find the other peer in the session
 			const otherPeerId = session.peers.find(id => id !== clientId);
 			if (!otherPeerId) {
-				console.log(`ERROR: No other peer found for ${message.type} - server.js:347`);
+				console.log(`ERROR: No other peer found for ${message.type} - server.js:434`);
 				sendJson(socket, { type: "error", message: "Peer not found" });
 				return;
 			}
 
 			const otherClient = clients.get(otherPeerId);
 			if (otherClient) {
-				console.log(`RELAYED ${message.type} from ${clientId.slice(0, 8)} to ${otherPeerId.slice(0, 8)} - server.js:354`);
+				console.log(`RELAYED ${message.type} from ${clientId.slice(0, 8)} to ${otherPeerId.slice(0, 8)} - server.js:441`);
 				sendJson(otherClient.socket, {
 					...message,
 					from: clientId
@@ -391,7 +469,7 @@ wss.on("connection", (socket) => {
 			}
 		}
 		clients.delete(clientId);
-		console.log(`Client disconnected: ${clientId} - server.js:385`);
+		console.log(`Client disconnected: ${clientId} - server.js:472`);
 	});
 
 	socket.on("error", () => {
@@ -401,10 +479,10 @@ wss.on("connection", (socket) => {
 
 const localIP = getLocalIP();
 server.listen(PORT, "0.0.0.0", () => {
-	console.log("DropGet server listening on: - server.js:395");
-	console.log(`Local HTTP: http://localhost:${PORT} - server.js:396`);
-	console.log(`Network HTTP: http://${localIP}:${PORT} - server.js:397`);
-	console.log(`Local WS: ws://localhost:${PORT} - server.js:398`);
-	console.log(`Network WS: ws://${localIP}:${PORT} - server.js:399`);
+	console.log("DropGet server listening on: - server.js:482");
+	console.log(`Local HTTP: http://localhost:${PORT} - server.js:483`);
+	console.log(`Network HTTP: http://${localIP}:${PORT} - server.js:484`);
+	console.log(`Local WS: ws://localhost:${PORT} - server.js:485`);
+	console.log(`Network WS: ws://${localIP}:${PORT} - server.js:486`);
 });
 
