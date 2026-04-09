@@ -8,7 +8,7 @@ interface ReceivedFile {
   url: string;
 }
 
-const P2P_CONNECTION_TIMEOUT_MS = 6000;
+const P2P_CONNECTION_TIMEOUT_MS = 5000;
 
 export function useFileTransfer(webrtc: WebRTCService) {
   const [isChannelReady, setIsChannelReady] = useState(false);
@@ -68,7 +68,7 @@ export function useFileTransfer(webrtc: WebRTCService) {
       }
 
       const { fileId } = await res.json();
-      wsService.send({ type: 'file-ready', fileId, fileName: file.name });
+      wsService.send({ type: 'file-ready', fileId });
       setSendingProgress(0);
     } catch (error) {
       console.error('Cloud upload error:', error);

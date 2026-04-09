@@ -56,7 +56,7 @@ export function FileTransfer({
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file && isChannelReady) {
+    if (file && isPeerConnected) {
       onSendFile(file);
     }
   };
@@ -66,7 +66,7 @@ export function FileTransfer({
     setIsDragging(false);
 
     const file = e.dataTransfer.files[0];
-    if (file && isChannelReady) {
+    if (file && isPeerConnected) {
       onSendFile(file);
     }
   };
@@ -113,7 +113,7 @@ export function FileTransfer({
         </div>
       )}
 
-      {isPeerConnected && isChannelReady && (
+      {isPeerConnected && (
         <div
           style={{
             ...styles.dropZone,
