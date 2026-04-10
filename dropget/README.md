@@ -51,6 +51,17 @@ npm start
 
 Frontend URL: `http://localhost:3000`
 
+### Frontend Environment Variables
+
+For deployed frontend builds (for example Vercel), configure these variables:
+
+```bash
+REACT_APP_API=https://getdrop-3.onrender.com
+REACT_APP_WS=wss://getdrop-3.onrender.com
+```
+
+You can copy `frontend/.env.example` for local setup.
+
 ## Notes
 
 - Files are transferred peer-to-peer after connection setup.

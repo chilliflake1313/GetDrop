@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { wsService } from '../services/websocket';
+import { API_BASE_URL } from '../config/endpoints';
 
 interface FileTransferProps {
   isChannelReady: boolean;
@@ -22,7 +23,6 @@ export function FileTransfer({
 }: FileTransferProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const apiBaseUrl = `http://${window.location.hostname}:3001`;
 
   useEffect(() => {
     const handler = async (msg: any) => {
@@ -31,7 +31,7 @@ export function FileTransfer({
       }
 
       try {
-        const res = await fetch(`${apiBaseUrl}/download/${msg.fileId}`);
+        const res = await fetch(`${API_BASE_URL}/download/${msg.fileId}`);
         if (!res.ok) {
           throw new Error(`Download URL request failed: ${res.status}`);
         }
@@ -52,7 +52,7 @@ export function FileTransfer({
     return () => {
       wsService.removeHandler(handler);
     };
-  }, [apiBaseUrl]);
+  }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { wsService } from '../services/websocket';
 import { WebRTCService } from '../services/webrtc';
-
-const WS_URL = 'wss://getdrop-3.onrender.com';
+import { WS_URL } from '../config/endpoints';
 
 export function useConnection() {
   const [sessionCode, setSessionCode] = useState<string>('');

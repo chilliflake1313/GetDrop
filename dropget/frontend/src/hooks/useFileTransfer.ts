@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { WebRTCService } from '../services/webrtc';
 import { fileTransferService, FileMetadata } from '../services/fileTransfer';
 import { wsService } from '../services/websocket';
+import { API_BASE_URL } from '../config/endpoints';
 
 interface ReceivedFile {
   metadata: FileMetadata;
@@ -15,7 +16,6 @@ export function useFileTransfer(webrtc: WebRTCService) {
   const [sendingProgress, setSendingProgress] = useState(0);
   const [receivingProgress, setReceivingProgress] = useState({ progress: 0, name: '' });
   const [receivedFiles, setReceivedFiles] = useState<ReceivedFile[]>([]);
-  const apiBaseUrl = `http://${window.location.hostname}:3001`;
 
   useEffect(() => {
     webrtc.onDataChannel((channel) => {
@@ -58,7 +58,7 @@ export function useFileTransfer(webrtc: WebRTCService) {
       const formData = new FormData();
       formData.append('file', file);
 
-      const res = await fetch(`${apiBaseUrl}/upload`, {
+      const res = await fetch(`${API_BASE_URL}/upload`, {
         method: 'POST',
         body: formData
       });
@@ -74,7 +74,7 @@ export function useFileTransfer(webrtc: WebRTCService) {
       console.error('Cloud upload error:', error);
       setSendingProgress(0);
     }
-  }, [apiBaseUrl]);
+  }, []);
 
   const waitForOpenChannel = useCallback(async (): Promise<RTCDataChannel | null> => {
     const existingChannel = webrtc.getDataChannel();
