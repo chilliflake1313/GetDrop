@@ -14,6 +14,15 @@ export interface FileTransferCallbacks {
   onError?: (error: Error) => void;
 }
 
+function downloadFile(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = name;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 export class FileTransferService {
   private async waitForBufferDrain(channel: RTCDataChannel): Promise<void> {
     while (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
@@ -33,14 +42,13 @@ export class FileTransferService {
       throw new Error('Data channel is not open');
     }
 
-    const metadata: FileMetadata = {
-      name: file.name,
-      size: file.size,
-      type: file.type
-    };
-
     try {
-      channel.send(JSON.stringify({ type: 'metadata', metadata }));
+      channel.send(JSON.stringify({
+        type: 'meta',
+        name: file.name,
+        size: file.size,
+        fileType: file.type
+      }));
 
       let offset = 0;
 
@@ -67,7 +75,7 @@ export class FileTransferService {
         await this.waitForBufferDrain(channel);
       }
 
-      channel.send(JSON.stringify({ type: 'end' }));
+      channel.send('EOF');
       callbacks?.onComplete?.();
     } catch (err) {
       const error = err instanceof Error ? err : new Error('File send error');
@@ -83,38 +91,64 @@ export class FileTransferService {
       onFileComplete?: (blob: Blob, metadata: FileMetadata) => void;
     }
   ): void {
+    let chunks: BlobPart[] = [];
     let receivedSize = 0;
-    let fileMetadata: FileMetadata | null = null;
-    const chunks: ArrayBuffer[] = [];
+    let fileSize = 0;
+    let fileName = '';
+    let fileType = 'application/octet-stream';
+
+    channel.binaryType = 'arraybuffer';
 
     channel.onmessage = (event) => {
       if (typeof event.data === 'string') {
-        const message = JSON.parse(event.data);
+        if (event.data === 'EOF') {
+          const blob = new Blob(chunks, { type: fileType });
+          const metadata: FileMetadata = {
+            name: fileName || 'download',
+            size: fileSize,
+            type: fileType
+          };
 
-        if (message.type === 'metadata') {
-          const metadata = message.metadata as FileMetadata;
-          fileMetadata = metadata;
-          callbacks?.onMetadata?.(metadata);
-        } else if (message.type === 'end') {
-          if (fileMetadata) {
-            const blob = new Blob(chunks, { type: fileMetadata.type });
-            callbacks?.onFileComplete?.(blob, fileMetadata);
-            callbacks?.onComplete?.();
-            
-            // Reset
-            chunks.length = 0;
-            receivedSize = 0;
-            fileMetadata = null;
+          downloadFile(blob, metadata.name);
+          callbacks?.onFileComplete?.(blob, metadata);
+          callbacks?.onComplete?.();
+
+          chunks = [];
+          receivedSize = 0;
+          fileSize = 0;
+          fileName = '';
+          fileType = 'application/octet-stream';
+          return;
+        }
+
+        try {
+          const message = JSON.parse(event.data);
+
+          if (message.type === 'meta') {
+            fileName = String(message.name || 'download');
+            fileSize = Number(message.size) || 0;
+            fileType = String(message.fileType || 'application/octet-stream');
+            callbacks?.onMetadata?.({
+              name: fileName,
+              size: fileSize,
+              type: fileType
+            });
           }
+        } catch {
+          console.warn('Unknown text frame received on data channel');
         }
-      } else {
-        chunks.push(event.data);
-        receivedSize += event.data.byteLength;
+        return;
+      }
 
-        if (fileMetadata) {
-          const progress = (receivedSize / fileMetadata.size) * 100;
-          callbacks?.onProgress?.(Math.round(progress));
-        }
+      chunks.push(event.data);
+      receivedSize += event.data.byteLength;
+
+      console.log('Received:', receivedSize);
+      console.log('Expected:', fileSize);
+
+      if (fileSize > 0) {
+        const progress = (receivedSize / fileSize) * 100;
+        callbacks?.onProgress?.(Math.round(progress));
       }
     };
   }
