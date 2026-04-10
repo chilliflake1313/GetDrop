@@ -1,0 +1,10 @@
+{
+  "name": "dropget",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "start": "npm --prefix dropget/backend start",
+    "dev": "npm --prefix dropget/backend run dev",
+    "postinstall": "npm --prefix dropget/backend install"
+  }
+}
