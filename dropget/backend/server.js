@@ -20,6 +20,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { sessionManager } from "./lib/sessionManager.js";
 import { ConnectionManager } from "./lib/connectionManager.js";
+import { FileCleanupManager } from "./lib/fileCleanupManager.js";
 
 dotenv.config({ path: fileURLToPath(new URL(".env", import.meta.url)), override: true });
 
@@ -43,7 +44,6 @@ const R2_ENDPOINT = normalizeR2Endpoint(process.env.R2_ENDPOINT) ||
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 const HUNDRED_MB_BYTES = 100 * 1024 * 1024;
-const CLEANUP_INTERVAL_MS = 60 * 1000;
 function getNumericEnv(name, fallbackValue) {
 	const rawValue = process.env[name];
 	if (rawValue === undefined) {
@@ -56,7 +56,6 @@ function getNumericEnv(name, fallbackValue) {
 
 const MAX_UPLOAD_SIZE_BYTES = getNumericEnv("MAX_UPLOAD_SIZE_BYTES", 1024 * 1024 * 1024);
 const MAX_UPLOAD_ATTEMPTS = 3;
-const MAX_CLEANUP_ATTEMPTS = 3;
 const MAX_ACTIVE_FILES = getNumericEnv("MAX_ACTIVE_FILES", 500);
 const UPLOAD_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const UPLOAD_RATE_LIMIT_MAX = 30;
@@ -102,18 +101,33 @@ function getLocalIP() {
 }
 
 const logger = {
-	info(meta, message) {
-		console.log(`${message} - server.js`, meta);
+	info(metaOrMessage, maybeMessage) {
+		if (typeof metaOrMessage === "string") {
+			console.log(`${metaOrMessage} - server.js`);
+			return;
+		}
+		console.log(`${maybeMessage} - server.js`, metaOrMessage);
 	},
-	warn(meta, message) {
-		console.warn(`${message} - server.js`, meta);
+	warn(metaOrMessage, maybeMessage) {
+		if (typeof metaOrMessage === "string") {
+			console.warn(`${metaOrMessage} - server.js`);
+			return;
+		}
+		console.warn(`${maybeMessage} - server.js`, metaOrMessage);
 	},
-	error(meta, message) {
-		console.error(`${message} - server.js`, meta);
+	error(metaOrMessage, maybeMessage) {
+		if (typeof metaOrMessage === "string") {
+			console.error(`${metaOrMessage} - server.js`);
+			return;
+		}
+		console.error(`${maybeMessage} - server.js`, metaOrMessage);
 	}
 };
 const connectionManager = new ConnectionManager(logger);
 connectionManager.startHeartbeat();
+const fileCleanupManager = new FileCleanupManager(logger, s3);
+fileCleanupManager.setBucket(BUCKET);
+fileCleanupManager.start();
 
 app.use((req, res, next) => {
 	res.header("Access-Control-Allow-Origin", "*");
@@ -159,12 +173,13 @@ function getFileExpiryMs(size) {
 
 function trackUploadedFile(fileId, size) {
 	const uploadedAt = Date.now();
+	const expiresAt = uploadedAt + getFileExpiryMs(size);
 	uploadedFiles.set(fileId, {
 		uploadedAt,
 		size,
-		expiresAt: uploadedAt + getFileExpiryMs(size),
-		cleanupAttempts: 0
+		expiresAt
 	});
+	fileCleanupManager.registerFile(fileId, expiresAt, size);
 }
 
 function isAllowedMimeType(mimeType) {
@@ -245,35 +260,15 @@ async function uploadWithRetry(params) {
 }
 
 export const cleanupFile = async (key) => {
+	fileCleanupManager.unregisterFile(key);
 	await getS3Client().send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
 	uploadedFiles.delete(key);
 };
 
-async function cleanupExpiredFiles() {
-	const now = Date.now();
-	for (const [fileId, metadata] of uploadedFiles.entries()) {
-		if (metadata.expiresAt > now) {
-			continue;
-		}
-
-		try {
-			await cleanupFile(fileId);
-		} catch (error) {
-			metadata.cleanupAttempts = (metadata.cleanupAttempts || 0) + 1;
-			uploadedFiles.set(fileId, metadata);
-			if (metadata.cleanupAttempts >= MAX_CLEANUP_ATTEMPTS) {
-				uploadedFiles.delete(fileId);
-			}
-			console.error("R2 cleanup error: - server.js:254", error);
-		}
-	}
-}
-
-setInterval(() => {
-	cleanupExpiredFiles().catch((error) => {
-		console.error("R2 cleanup interval error: - server.js:261", error);
-	});
-}, CLEANUP_INTERVAL_MS);
+fileCleanupManager.deleteFile = async (fileId) => {
+	await getS3Client().send(new DeleteObjectCommand({ Bucket: BUCKET, Key: fileId }));
+	uploadedFiles.delete(fileId);
+};
 
 app.post("/upload", uploadRateLimiter, upload.single("file"), async (req, res) => {
 	let tempFilePath = null;
