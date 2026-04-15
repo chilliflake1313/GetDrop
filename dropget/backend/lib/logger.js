@@ -4,6 +4,7 @@ const isProduction = process.env.NODE_ENV === "production";
 
 const pinoConfig = {
 	level: process.env.LOG_LEVEL || (isProduction ? "info" : "debug"),
+	timestamp: pino.stdTimeFunctions.isoTime,
 	transport: isProduction
 		? undefined
 		: {
@@ -11,7 +12,8 @@ const pinoConfig = {
 			options: {
 				colorize: true,
 				translateTime: "SYS:standard",
-				ignore: "pid,hostname"
+				ignore: "pid,hostname",
+				singleLine: false
 			}
 		}
 };
