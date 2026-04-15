@@ -18,6 +18,7 @@ import {
 	DeleteObjectCommand
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { sessionManager } from "./lib/sessionManager.js";
 
 dotenv.config({ path: fileURLToPath(new URL(".env", import.meta.url)), override: true });
 
@@ -100,7 +101,6 @@ function getLocalIP() {
 }
 
 const clients = new Map();
-const sessions = new Map();
 
 app.use((req, res, next) => {
 	res.header("Access-Control-Allow-Origin", "*");
@@ -122,10 +122,6 @@ app.get("/", (req, res) => {
 		ws: "wss://getdrop-3.onrender.com"
 	});
 });
-
-function generateSessionCode() {
-	return Math.random().toString(36).substring(2, 10).toUpperCase();
-}
 
 function sendJson(socket, payload) {
 	if (socket.readyState === socket.OPEN) {
@@ -373,10 +369,14 @@ wss.on("connection", (socket) => {
 
 		// Handle session creation
 		if (message.type === "create") {
-			const code = generateSessionCode();
-			clientInfo.sessionCode = code;
-			sessions.set(code, { peers: [clientId], createdAt: Date.now() });
-			sendJson(socket, { type: "created", code });
+			try {
+				const { code, sessionId } = sessionManager.createSession(clientId);
+				clientInfo.sessionCode = code;
+				sendJson(socket, { type: "created", code, sessionId });
+			} catch (error) {
+				console.error("Session create error: - server.js:376", error);
+				sendJson(socket, { type: "error", message: "Could not create session" });
+			}
 			console.log(`Session created: ${code} - server.js:380`);
 			return;
 		}
@@ -384,24 +384,28 @@ wss.on("connection", (socket) => {
 		// Handle session join
 		if (message.type === "join") {
 			const { code } = message;
-			console.log(`JOIN REQUEST: code="${code}", sessions=${Array.from(sessions.keys()).join(", ")} - server.js:387`);
-			if (!code || !sessions.has(code)) {
-				console.log(`ERROR: Session "${code}" not found - server.js:389`);
+			console.log(`JOIN REQUEST: code="${code}" - server.js:387`);
+			if (!code) {
 				sendJson(socket, { type: "error", message: "Session not found" });
 				return;
 			}
 
-			const session = sessions.get(code);
-			if (session.peers.length >= 2) {
-				sendJson(socket, { type: "error", message: "Session full" });
+			const joinResult = sessionManager.joinSession(code, clientId);
+			if (!joinResult.success) {
+				sendJson(socket, { type: "error", message: joinResult.error });
+				return;
+			}
+
+			const session = sessionManager.getSession(code);
+			if (!session) {
+				sendJson(socket, { type: "error", message: "Session not found" });
 				return;
 			}
 
 			clientInfo.sessionCode = code;
-			session.peers.push(clientId);
 
 			// Notify both peers
-			sendJson(socket, { type: "joined", code });
+			sendJson(socket, { type: "joined", code, sessionId: session.id });
 
 			const otherPeerId = session.peers[0];
 			const otherClient = clients.get(otherPeerId);
@@ -421,7 +425,7 @@ wss.on("connection", (socket) => {
 				return;
 			}
 
-			const session = sessions.get(clientInfo.sessionCode);
+			const session = sessionManager.getSession(clientInfo.sessionCode);
 			if (!session || session.peers.length < 2) {
 				console.log(`ERROR: ${message.type} received but peer not found in session - server.js:426`);
 				sendJson(socket, { type: "error", message: "Peer not found" });
@@ -450,21 +454,15 @@ wss.on("connection", (socket) => {
 	socket.on("close", () => {
 		const clientInfo = clients.get(clientId);
 		if (clientInfo && clientInfo.sessionCode) {
-			const session = sessions.get(clientInfo.sessionCode);
+			const session = sessionManager.removeClientFromSession(clientId);
 			if (session) {
-				session.peers = session.peers.filter(id => id !== clientId);
-
 				// Notify the other peer
-				const otherPeerId = session.peers.find(id => id !== clientId);
+				const otherPeerId = session.peers.find((id) => id !== clientId);
 				if (otherPeerId) {
 					const otherClient = clients.get(otherPeerId);
 					if (otherClient) {
 						sendJson(otherClient.socket, { type: "peer-left" });
 					}
-				}
-
-				if (session.peers.length === 0) {
-					sessions.delete(clientInfo.sessionCode);
 				}
 			}
 		}
