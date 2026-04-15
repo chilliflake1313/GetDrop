@@ -19,6 +19,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { sessionManager } from "./lib/sessionManager.js";
+import { ConnectionManager } from "./lib/connectionManager.js";
 
 dotenv.config({ path: fileURLToPath(new URL(".env", import.meta.url)), override: true });
 
@@ -100,7 +101,19 @@ function getLocalIP() {
 	return "localhost";
 }
 
-const clients = new Map();
+const logger = {
+	info(meta, message) {
+		console.log(`${message} - server.js`, meta);
+	},
+	warn(meta, message) {
+		console.warn(`${message} - server.js`, meta);
+	},
+	error(meta, message) {
+		console.error(`${message} - server.js`, meta);
+	}
+};
+const connectionManager = new ConnectionManager(logger);
+connectionManager.startHeartbeat();
 
 app.use((req, res, next) => {
 	res.header("Access-Control-Allow-Origin", "*");
@@ -127,6 +140,10 @@ function sendJson(socket, payload) {
 	if (socket.readyState === socket.OPEN) {
 		socket.send(JSON.stringify(payload));
 	}
+}
+
+function sendToClient(clientId, payload) {
+	connectionManager.sendMessage(clientId, payload);
 }
 
 function getS3Client() {
@@ -349,8 +366,7 @@ app.use((error, req, res, next) => {
 });
 
 wss.on("connection", (socket) => {
-	const clientId = randomUUID();
-	clients.set(clientId, { socket, sessionCode: null });
+	const clientId = connectionManager.addConnection(socket);
 
 	console.log(`Client connected: ${clientId} - server.js:359`);
 
@@ -364,20 +380,21 @@ wss.on("connection", (socket) => {
 			return;
 		}
 
-		const clientInfo = clients.get(clientId);
+		const clientInfo = connectionManager.getConnection(clientId);
 		if (!clientInfo) return;
+		clientInfo.messagesReceived += 1;
 
 		// Handle session creation
 		if (message.type === "create") {
 			try {
 				const { code, sessionId } = sessionManager.createSession(clientId);
-				clientInfo.sessionCode = code;
-				sendJson(socket, { type: "created", code, sessionId });
+				connectionManager.setSessionCode(clientId, code);
+				sendToClient(clientId, { type: "created", code, sessionId });
+				console.log(`Session created: ${code} - server.js:380`);
 			} catch (error) {
 				console.error("Session create error: - server.js:376", error);
-				sendJson(socket, { type: "error", message: "Could not create session" });
+				sendToClient(clientId, { type: "error", message: "Could not create session" });
 			}
-			console.log(`Session created: ${code} - server.js:380`);
 			return;
 		}
 
@@ -386,31 +403,31 @@ wss.on("connection", (socket) => {
 			const { code } = message;
 			console.log(`JOIN REQUEST: code="${code}" - server.js:387`);
 			if (!code) {
-				sendJson(socket, { type: "error", message: "Session not found" });
+				sendToClient(clientId, { type: "error", message: "Session not found" });
 				return;
 			}
 
 			const joinResult = sessionManager.joinSession(code, clientId);
 			if (!joinResult.success) {
-				sendJson(socket, { type: "error", message: joinResult.error });
+				sendToClient(clientId, { type: "error", message: joinResult.error });
 				return;
 			}
 
 			const session = sessionManager.getSession(code);
 			if (!session) {
-				sendJson(socket, { type: "error", message: "Session not found" });
+				sendToClient(clientId, { type: "error", message: "Session not found" });
 				return;
 			}
 
-			clientInfo.sessionCode = code;
+			connectionManager.setSessionCode(clientId, code);
 
 			// Notify both peers
-			sendJson(socket, { type: "joined", code, sessionId: session.id });
+			sendToClient(clientId, { type: "joined", code, sessionId: session.id });
 
 			const otherPeerId = session.peers[0];
-			const otherClient = clients.get(otherPeerId);
+			const otherClient = connectionManager.getConnection(otherPeerId);
 			if (otherClient) {
-				sendJson(otherClient.socket, { type: "peer-joined", peerId: clientId });
+				sendToClient(otherPeerId, { type: "peer-joined", peerId: clientId });
 			}
 
 			console.log(`Client joined session ${code}: ${clientId} - server.js:412`);
@@ -421,14 +438,14 @@ wss.on("connection", (socket) => {
 		if (["offer", "answer", "ice-candidate", "file-ready"].includes(message.type)) {
 			if (!clientInfo.sessionCode) {
 				console.log(`ERROR: ${message.type} received but client not in session - server.js:419`);
-				sendJson(socket, { type: "error", message: "Not in a session" });
+				sendToClient(clientId, { type: "error", message: "Not in a session" });
 				return;
 			}
 
 			const session = sessionManager.getSession(clientInfo.sessionCode);
 			if (!session || session.peers.length < 2) {
 				console.log(`ERROR: ${message.type} received but peer not found in session - server.js:426`);
-				sendJson(socket, { type: "error", message: "Peer not found" });
+				sendToClient(clientId, { type: "error", message: "Peer not found" });
 				return;
 			}
 
@@ -436,14 +453,14 @@ wss.on("connection", (socket) => {
 			const otherPeerId = session.peers.find(id => id !== clientId);
 			if (!otherPeerId) {
 				console.log(`ERROR: No other peer found for ${message.type} - server.js:434`);
-				sendJson(socket, { type: "error", message: "Peer not found" });
+				sendToClient(clientId, { type: "error", message: "Peer not found" });
 				return;
 			}
 
-			const otherClient = clients.get(otherPeerId);
+			const otherClient = connectionManager.getConnection(otherPeerId);
 			if (otherClient) {
 				console.log(`RELAYED ${message.type} from ${clientId.slice(0, 8)} to ${otherPeerId.slice(0, 8)} - server.js:441`);
-				sendJson(otherClient.socket, {
+				sendToClient(otherPeerId, {
 					...message,
 					from: clientId
 				});
@@ -452,26 +469,26 @@ wss.on("connection", (socket) => {
 	});
 
 	socket.on("close", () => {
-		const clientInfo = clients.get(clientId);
+		const clientInfo = connectionManager.getConnection(clientId);
 		if (clientInfo && clientInfo.sessionCode) {
 			const session = sessionManager.removeClientFromSession(clientId);
 			if (session) {
 				// Notify the other peer
 				const otherPeerId = session.peers.find((id) => id !== clientId);
 				if (otherPeerId) {
-					const otherClient = clients.get(otherPeerId);
+					const otherClient = connectionManager.getConnection(otherPeerId);
 					if (otherClient) {
-						sendJson(otherClient.socket, { type: "peer-left" });
+						sendToClient(otherPeerId, { type: "peer-left" });
 					}
 				}
 			}
 		}
-		clients.delete(clientId);
+		connectionManager.removeConnection(clientId);
 		console.log(`Client disconnected: ${clientId} - server.js:472`);
 	});
 
 	socket.on("error", () => {
-		clients.delete(clientId);
+		connectionManager.removeConnection(clientId);
 	});
 });
 
