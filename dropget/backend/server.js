@@ -18,13 +18,19 @@ import {
 	DeleteObjectCommand
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import PQueue from "p-queue";
+
+import { createLogger, logger } from "./lib/logger.js";
 import { sessionManager } from "./lib/sessionManager.js";
 import { ConnectionManager } from "./lib/connectionManager.js";
 import { FileCleanupManager } from "./lib/fileCleanupManager.js";
-import { createLogger } from "./lib/logger.js";
 
-dotenv.config({ path: fileURLToPath(new URL(".env", import.meta.url)), override: true });
+dotenv.config({
+	path: fileURLToPath(new URL(".env", import.meta.url)),
+	override: true
+});
 
+const appLogger = createLogger("server");
 const PORT = Number(process.env.PORT) || 3001;
 const BUCKET = process.env.R2_BUCKET || "get-drop";
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
@@ -72,13 +78,21 @@ const upload = multer({
 });
 const uploadRateLimiter = rateLimit({
 	windowMs: UPLOAD_RATE_LIMIT_WINDOW_MS,
-	max: UPLOAD_RATE_LIMIT_MAX
+	max: UPLOAD_RATE_LIMIT_MAX,
+	skip: (req) => {
+		// Skip rate limiting for /health
+		return req.path === "/health";
+	}
 });
 
 const uploadedFiles = new Map();
 
-const s3 = R2_ENDPOINT
-	? new S3Client({
+const connectionManager = new ConnectionManager(appLogger);
+const fileCleanupManager = new FileCleanupManager(appLogger);
+
+const s3 =
+	R2_ENDPOINT &&
+	new S3Client({
 		region: "auto",
 		endpoint: R2_ENDPOINT,
 		credentials: {
@@ -86,8 +100,9 @@ const s3 = R2_ENDPOINT
 			secretAccessKey: process.env.R2_SECRET_KEY || ""
 		},
 		forcePathStyle: true
-	})
-	: null;
+	});
+
+fileCleanupManager.setBucket(BUCKET);
 
 function getLocalIP() {
 	const interfaces = networkInterfaces();
@@ -100,15 +115,6 @@ function getLocalIP() {
 	}
 	return "localhost";
 }
-
-const connectionLogger = createLogger("connection-manager");
-const cleanupLogger = createLogger("file-cleanup-manager");
-
-const connectionManager = new ConnectionManager(connectionLogger);
-connectionManager.startHeartbeat();
-const fileCleanupManager = new FileCleanupManager(cleanupLogger, s3);
-fileCleanupManager.setBucket(BUCKET);
-fileCleanupManager.start();
 
 app.use((req, res, next) => {
 	res.header("Access-Control-Allow-Origin", "*");
