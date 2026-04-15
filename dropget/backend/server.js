@@ -21,6 +21,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { sessionManager } from "./lib/sessionManager.js";
 import { ConnectionManager } from "./lib/connectionManager.js";
 import { FileCleanupManager } from "./lib/fileCleanupManager.js";
+import { createLogger } from "./lib/logger.js";
 
 dotenv.config({ path: fileURLToPath(new URL(".env", import.meta.url)), override: true });
 
@@ -100,32 +101,12 @@ function getLocalIP() {
 	return "localhost";
 }
 
-const logger = {
-	info(metaOrMessage, maybeMessage) {
-		if (typeof metaOrMessage === "string") {
-			console.log(`${metaOrMessage} - server.js`);
-			return;
-		}
-		console.log(`${maybeMessage} - server.js`, metaOrMessage);
-	},
-	warn(metaOrMessage, maybeMessage) {
-		if (typeof metaOrMessage === "string") {
-			console.warn(`${metaOrMessage} - server.js`);
-			return;
-		}
-		console.warn(`${maybeMessage} - server.js`, metaOrMessage);
-	},
-	error(metaOrMessage, maybeMessage) {
-		if (typeof metaOrMessage === "string") {
-			console.error(`${metaOrMessage} - server.js`);
-			return;
-		}
-		console.error(`${maybeMessage} - server.js`, metaOrMessage);
-	}
-};
-const connectionManager = new ConnectionManager(logger);
+const connectionLogger = createLogger("connection-manager");
+const cleanupLogger = createLogger("file-cleanup-manager");
+
+const connectionManager = new ConnectionManager(connectionLogger);
 connectionManager.startHeartbeat();
-const fileCleanupManager = new FileCleanupManager(logger, s3);
+const fileCleanupManager = new FileCleanupManager(cleanupLogger, s3);
 fileCleanupManager.setBucket(BUCKET);
 fileCleanupManager.start();
 
