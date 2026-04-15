@@ -88,7 +88,7 @@ export class FileTransferService {
     channel: RTCDataChannel,
     callbacks?: FileTransferCallbacks & {
       onMetadata?: (metadata: FileMetadata) => void;
-      onFileComplete?: (blob: Blob, metadata: FileMetadata) => void;
+      onFileComplete?: (blob: Blob | null, metadata: FileMetadata) => void;
     }
   ): void {
     let chunks: BlobPart[] = [];
@@ -96,21 +96,35 @@ export class FileTransferService {
     let fileSize = 0;
     let fileName = '';
     let fileType = 'application/octet-stream';
+    let fileHandle: any = null;
+    let writableStream: any = null;
+    let useFileSystemAPI = typeof (window as any).showSaveFilePicker === 'function';
 
     channel.binaryType = 'arraybuffer';
 
-    channel.onmessage = (event) => {
+    channel.onmessage = async (event) => {
       if (typeof event.data === 'string') {
         if (event.data === 'EOF') {
-          const blob = new Blob(chunks, { type: fileType });
           const metadata: FileMetadata = {
             name: fileName || 'download',
             size: fileSize,
             type: fileType
           };
 
-          downloadFile(blob, metadata.name);
-          callbacks?.onFileComplete?.(blob, metadata);
+          if (writableStream) {
+            try {
+              await writableStream.close();
+              callbacks?.onFileComplete?.(null, metadata);
+            } catch (error) {
+              const err = error instanceof Error ? error : new Error('Failed to finalize stream');
+              callbacks?.onError?.(err);
+            }
+          } else {
+            const blob = new Blob(chunks, { type: fileType });
+            downloadFile(blob, metadata.name);
+            callbacks?.onFileComplete?.(blob, metadata);
+          }
+
           callbacks?.onComplete?.();
 
           chunks = [];
@@ -118,6 +132,9 @@ export class FileTransferService {
           fileSize = 0;
           fileName = '';
           fileType = 'application/octet-stream';
+          fileHandle = null;
+          writableStream = null;
+          useFileSystemAPI = typeof (window as any).showSaveFilePicker === 'function';
           return;
         }
 
@@ -140,8 +157,39 @@ export class FileTransferService {
         return;
       }
 
-      chunks.push(event.data);
-      receivedSize += event.data.byteLength;
+      const binaryData = event.data as ArrayBuffer;
+      receivedSize += binaryData.byteLength;
+
+      if (useFileSystemAPI) {
+        try {
+          if (!fileHandle) {
+            fileHandle = await (window as any).showSaveFilePicker({
+              suggestedName: fileName || 'download',
+              types: [{
+                description: 'All Files',
+                accept: { '*/*': [] }
+              }]
+            });
+            writableStream = await fileHandle.createWritable();
+          }
+
+          await writableStream.write(binaryData);
+        } catch {
+          // Fallback to memory if File System Access API fails.
+          useFileSystemAPI = false;
+          if (writableStream) {
+            try {
+              await writableStream.close();
+            } catch {
+              // Ignore close errors in fallback path.
+            }
+            writableStream = null;
+          }
+          chunks.push(binaryData);
+        }
+      } else {
+        chunks.push(binaryData);
+      }
 
       console.log('Received:', receivedSize);
       console.log('Expected:', fileSize);

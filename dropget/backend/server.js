@@ -2,8 +2,6 @@ import express from "express";
 import rateLimit from "express-rate-limit";
 import multer from "multer";
 import { createServer } from "node:http";
-import { createReadStream } from "node:fs";
-import { unlink } from "node:fs/promises";
 import { extname } from "node:path";
 import dotenv from "dotenv";
 import { fileURLToPath } from "node:url";
@@ -62,7 +60,7 @@ function getNumericEnv(name, fallbackValue) {
 	return Number.isFinite(parsed) ? parsed : fallbackValue;
 }
 
-const MAX_UPLOAD_SIZE_BYTES = getNumericEnv("MAX_UPLOAD_SIZE_BYTES", 1024 * 1024 * 1024);
+const MAX_UPLOAD_SIZE_BYTES = getNumericEnv("MAX_UPLOAD_SIZE_BYTES", 100 * 1024 * 1024);
 const MAX_UPLOAD_ATTEMPTS = 3;
 const MAX_ACTIVE_FILES = getNumericEnv("MAX_ACTIVE_FILES", 500);
 const UPLOAD_RATE_LIMIT_WINDOW_MS = 60 * 1000;
@@ -77,7 +75,7 @@ const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
 const upload = multer({
-	dest: "tmp_uploads/",
+	storage: multer.memoryStorage(),
 	limits: { fileSize: MAX_UPLOAD_SIZE_BYTES }
 });
 
@@ -270,15 +268,11 @@ app.get("/", (req, res) => {
 });
 
 app.post("/upload", uploadRateLimiter, upload.single("file"), async (req, res) => {
-	let tempFilePath = null;
-
 	try {
 		if (!req.file) {
 			res.status(400).json({ message: "No file uploaded" });
 			return;
 		}
-
-		tempFilePath = req.file.path || null;
 
 		if ((req.file.size || 0) > MAX_UPLOAD_SIZE_BYTES) {
 			res.status(400).json({ message: "File too large" });
@@ -302,13 +296,13 @@ app.post("/upload", uploadRateLimiter, upload.single("file"), async (req, res) =
 
 		const extension = extname(req.file.originalname || "");
 		const fileId = await createUniqueFileId(extension);
-		const fileStream = createReadStream(req.file.path);
 
 		await uploadWithRetry({
 			Bucket: BUCKET,
 			Key: fileId,
-			Body: fileStream,
-			ContentType: req.file.mimetype || "application/octet-stream"
+			Body: req.file.buffer,
+			ContentType: req.file.mimetype || "application/octet-stream",
+			ContentLength: req.file.size
 		});
 
 		trackUploadedFile(fileId, req.file.size || 0);
@@ -322,12 +316,6 @@ app.post("/upload", uploadRateLimiter, upload.single("file"), async (req, res) =
 	} catch (error) {
 		appLogger.error({ error: error.message }, "Upload failed");
 		res.status(500).json({ message: "Upload failed" });
-	} finally {
-		if (tempFilePath) {
-			unlink(tempFilePath).catch(() => {
-				// Best effort cleanup
-			});
-		}
 	}
 });
 

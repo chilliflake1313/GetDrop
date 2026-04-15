@@ -3,7 +3,12 @@ import { wsService } from './websocket';
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }
+    { urls: 'stun:stun1.l.google.com:19302' },
+    {
+      urls: process.env.REACT_APP_TURN_URL || 'turn:your-turn-server.com:3478',
+      username: process.env.REACT_APP_TURN_USERNAME || '',
+      credential: process.env.REACT_APP_TURN_CREDENTIAL || ''
+    }
   ]
 };
 

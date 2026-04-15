@@ -29,8 +29,10 @@ export function useFileTransfer(webrtc: WebRTCService) {
           setReceivingProgress((prev) => ({ ...prev, progress }));
         },
         onFileComplete: (blob, metadata) => {
-          const url = URL.createObjectURL(blob);
-          setReceivedFiles((prev) => [...prev, { metadata, url }]);
+          if (blob) {
+            const url = URL.createObjectURL(blob);
+            setReceivedFiles((prev) => [...prev, { metadata, url }]);
+          }
           setReceivingProgress({ progress: 0, name: '' });
         },
         onError: (error) => {
